@@ -2,8 +2,39 @@ import torch
 import torch.nn as nn
 import torch.distributed as dist
 import torch.multiprocessing as mp
+from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
+
+from torchvision import datasets, transforms
 
 from model import ShardedCNN, all_reduce
+
+def setup_dataset(world_size, rank, bs=32):
+    """Setup the dataloader with Distributed Sampling"""
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.1307,), (0.3081,))
+    ])
+
+    dataset = datasets.MNIST(
+        root='data/', 
+        train=True, 
+        transform=transform, 
+        download=True
+    )
+    sampler = DistributedSampler(
+        dataset, 
+        num_replicas=world_size, 
+        rank=rank
+    )
+
+    dataloader = DataLoader(
+        dataset,
+        batch_size=bs,
+        sampler=sampler
+    )
+
+    return dataloader
 
 def train_fsdp(rank, world_size):
     """Trains a model using FSDP training strategy"""
@@ -19,31 +50,36 @@ def train_fsdp(rank, world_size):
     optimizer = torch.optim.Adam(model.parameters(), lr=2e-3)
     loss_fn = nn.CrossEntropyLoss()
 
+    dataloader = setup_dataset(world_size, rank, bs=64)
+
     # Run training for 100 epochs
     for epoch in range(100):
+        running_loss = 0
         # Transfer the input data to the current rank
-        inputs = torch.randn(64, 1, 128).cuda(rank)
-        targets = torch.randint(0, 10, (64,)).cuda(rank)
+        for idx, (images, targets) in enumerate(dataloader):
+            inputs = images.cuda(rank)
+            targets = targets.cuda(rank)
 
-        # Clear out the optimizer
-        optimizer.zero_grad()
-        
-        # Run one forward pass and calculate loss
-        outputs = model(inputs)
-        loss = loss_fn(outputs, targets)
-        
-        # Backprop the loss and sync the gradients
-        loss.backward()
-        all_reduce(model)
+            # Clear out the optimizer
+            optimizer.zero_grad()
+            
+            # Run one forward pass and calculate loss
+            outputs = model(inputs)
+            loss = loss_fn(outputs, targets)
+            
+            # Backprop the loss and sync the gradients
+            loss.backward()
+            all_reduce(model)
+            running_loss += loss.item()
 
-        # Take one optimizer step
-        optimizer.step()
+            # Take one optimizer step
+            optimizer.step()
 
-        if rank == 0:
-            print(f"epoch: {epoch} / 100, train_loss: {loss.item():.4f}")
+            if idx > 0 and idx % 100 == 0 and rank == 0:
+                print(f"epoch: {epoch+1}, batch: {idx+1}, loss: {running_loss / 100:.4f}")
+                running_loss = 0.0
     
     dist.destroy_process_group()
-
 
 if __name__ == "__main__":
     # Run the training

@@ -11,11 +11,11 @@ class ShardedCNN(nn.Module):
         self.conv1 = ShardedConv1d(1, 32, kernel_size=3, padding=1)
         self.conv2 = ShardedConv1d(32, 64, kernel_size=3, padding=1)
 
-        self.pool = nn.AvgPool1d(2)
+        self.pool = nn.MaxPool2d(2)
         self.drop1 = nn.Dropout(0.2)
         self.drop2 = nn.Dropout(0.2)
 
-        self.fc1 = ShardedLinear(64 * 32, 128)
+        self.fc1 = ShardedLinear(64 * 7 * 7, 128)
         self.fc2 = ShardedLinear(128, num_classes)
 
     def shard_parameters(self, rank, world_size):
